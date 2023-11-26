@@ -21,17 +21,22 @@ import (
 
 var RemovalFiles []string
 
-func RunCommand(cmdLn string) (bytes.Buffer, error) {
-	app := "cmd.exe"
+func RunCommand(app string, cmdLn string, stdin string) (bytes.Buffer, error) {
 	cmd := exec.Command(app)
+	if errors.Is(cmd.Err, exec.ErrDot) {
+		cmd.Err = nil
+	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: cmdLn}
-
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	var outb, errb bytes.Buffer
 	cmd.Stdout = &outb
 	cmd.Stderr = &errb
 
 	err := cmd.Run()
+	// fmt.Println(err, "\n", outb.String(), "\n", errb.String())
 	if err != nil {
 		newErr := errors.New(errb.String() + "\n" + err.Error())
 		return bytes.Buffer{}, newErr
@@ -43,8 +48,8 @@ func RunCommand(cmdLn string) (bytes.Buffer, error) {
 func DownloadVideo(title, link string) error {
 	fmt.Printf("Downloading \"%s\"...", title)
 
-	cmdLn := fmt.Sprintf("/c yt-dlp -f \"ba/b\" -x --audio-format mp3 %s -o \"%s\"", link, title)
-	_, err := RunCommand(cmdLn)
+	cmdLn := fmt.Sprintf("/c -f \"ba/b\" -x --audio-format mp3 %s -o \"%s\"", link, title)
+	_, err := RunCommand("yt-dlp", cmdLn, "")
 	if err != nil {
 		return err
 	}
@@ -55,9 +60,9 @@ func DownloadVideo(title, link string) error {
 
 func sectionAudio(start, finish, trackName, filename, dir string) (string, error) {
 	trackName = filepath.Join(dir, trackName+".mp3")
-	cmdLn := fmt.Sprintf("/c ffmpeg -i \"%s.mp3\" -ss %s -to %s -c copy \"%s\"", filename, start, finish, trackName)
+	cmdLn := fmt.Sprintf("/c -i \"%s.mp3\" -ss %s -to %s -c copy \"%s\"", filename, start, finish, trackName)
 
-	_, err := RunCommand(cmdLn)
+	_, err := RunCommand("ffmpeg", cmdLn, "")
 	if err != nil {
 		return "", err
 	}
@@ -165,8 +170,13 @@ func AddTags(trackName, albumTitle, artistName, fileName, dir string) error {
 
 func GetChannelName(title string) (string, error) {
 	fmt.Println("Getting channel name...")
-	cmdLn := fmt.Sprintf("/c type \"%s.json\" | jq --raw-output \".channel\"", title)
-	buffer, err := RunCommand(cmdLn)
+	cmdLn := "/c --raw-output \".channel\""
+	dump, err := os.ReadFile(title + ".json")
+	if err != nil {
+		return "", err
+	}
+
+	buffer, err := RunCommand("jq", cmdLn, string(dump))
 	if err != nil {
 		return "", err
 	}
@@ -176,11 +186,41 @@ func GetChannelName(title string) (string, error) {
 	return output, nil
 }
 
+func SaveDumpFile(title, link string) error {
+	fmt.Println("Saving dump file...")
+	cmdLn := fmt.Sprintf("/c --dump-json %s", link)
+	dump, err := RunCommand("yt-dlp", cmdLn, "")
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Create(title + ".json")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(dump.String())
+	if err != nil {
+		return err
+	}
+
+	RemovalFiles = append(RemovalFiles, title+".json")
+	fmt.Println("Dump file saved!")
+	return nil
+}
+
 func GetTitle(link string) (string, error) {
 	fmt.Println("Getting video title...")
 
-	cmdLn := fmt.Sprintf("/c yt-dlp --dump-json %s | jq --raw-output \".title\"", link)
-	buffer, err := RunCommand(cmdLn)
+	cmdLn := fmt.Sprintf("/c --dump-json %s", link)
+	dump, err := RunCommand("yt-dlp", cmdLn, "")
+	if err != nil {
+		return "", err
+	}
+
+	cmdLn = "/c --raw-output \".title\""
+	buffer, err := RunCommand("jq", cmdLn, dump.String())
 	if err != nil {
 		return "", err
 	}
@@ -190,12 +230,6 @@ func GetTitle(link string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmdLn = fmt.Sprintf("/c  yt-dlp --dump-json %s > \"%s.json\"", link, title)
-	_, err = RunCommand(cmdLn)
-	if err != nil {
-		return "", err
-	}
-	RemovalFiles = append(RemovalFiles, title+".json")
 
 	fmt.Println("Got video title!")
 	return title, nil
@@ -203,15 +237,15 @@ func GetTitle(link string) (string, error) {
 
 func GetThumbNail(link, title string) error {
 	fmt.Println("Getting channel thumbnail...")
-	cmdLn := fmt.Sprintf("/c yt-dlp --write-thumbnail --skip-download -o \"thumbnail:%s\" %s", title, link)
-	_, err := RunCommand(cmdLn)
+	cmdLn := fmt.Sprintf("/c  --write-thumbnail --skip-download -o \"thumbnail:%s\" %s", title, link)
+	_, err := RunCommand("yt-dlp", cmdLn, "")
 	if err != nil {
 		return err
 	}
 	RemovalFiles = append(RemovalFiles, title+".webp")
 
-	cmdLn = fmt.Sprintf("/c ffmpeg -i \"%s.webp\" -filter:v \"crop=720:720:280:360\" \"%s.jpg\"", title, title)
-	_, err = RunCommand(cmdLn)
+	cmdLn = fmt.Sprintf("/c -i \"%s.webp\" -filter:v \"crop=ih:ih\" \"%s.jpg\"", title, title)
+	_, err = RunCommand("ffmpeg", cmdLn, "")
 	if err != nil {
 		return err
 	}
@@ -222,8 +256,14 @@ func GetThumbNail(link, title string) error {
 }
 
 func GetDuration(title string) (string, error) {
-	cmdLn := fmt.Sprintf("/c type \"%s.json\" | jq --raw-output \".duration\" ", title)
-	buffer, err := RunCommand(cmdLn)
+	cmdLn := "/c --raw-output \".duration\""
+
+	dump, err := os.ReadFile(title + ".json")
+	if err != nil {
+		return "", err
+	}
+
+	buffer, err := RunCommand("jq", cmdLn, string(dump))
 	if err != nil {
 		return "", err
 	}
@@ -248,8 +288,12 @@ func GetDuration(title string) (string, error) {
 func GetTimeStamps(title string) ([]string, error) {
 	fmt.Println("Getting timestamps...")
 
-	cmdLn := fmt.Sprintf("/c type \"%s.json\" | jq --raw-output \".chapters[].start_time\"", title)
-	stamps, err := RunCommand(cmdLn)
+	cmdLn := "/c --raw-output \".chapters[].start_time\""
+	dump, err := os.ReadFile(title + ".json")
+	if err != nil {
+		return []string{}, err
+	}
+	stamps, err := RunCommand("jq", cmdLn, string(dump))
 	if err != nil {
 		return []string{}, err
 	}
@@ -277,8 +321,14 @@ func GetTimeStamps(title string) ([]string, error) {
 
 func GetTrackNames(title string) ([]string, error) {
 	fmt.Println("Getting track names...")
-	cmdLn := fmt.Sprintf("/c type \"%s.json\" | jq --raw-output \".chapters[].title\"", title)
-	outb, err := RunCommand(cmdLn)
+	cmdLn := "/c --raw-output \".chapters[].title\""
+
+	dump, err := os.ReadFile(title + ".json")
+	if err != nil {
+		return []string{}, err
+	}
+
+	outb, err := RunCommand("jq", cmdLn, string(dump))
 	if err != nil {
 		return []string{}, err
 	}
@@ -322,6 +372,10 @@ func RemoveFile() {
 
 func Bub(keepTmpFiles bool, link, defaultFolder string) error {
 	title, err := GetTitle(link)
+	if err != nil {
+		return err
+	}
+	err = SaveDumpFile(title, link)
 	if err != nil {
 		return err
 	}
