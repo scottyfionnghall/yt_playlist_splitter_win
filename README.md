@@ -17,5 +17,7 @@ Program to split YouTube videos (that are basically playlists just in one video)
 
 
 - Add more verbose errors
-- Add a tmp folder to store all files that are needed
+- ~~Fix repeating track names bug~~
+- ~~Fix name validation function~~
+- ~~Add a tmp folder to store all files that are needed~~
 - Clean up code ... 500 lines in one files is too much

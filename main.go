@@ -19,8 +19,6 @@ import (
 	"github.com/bogem/id3v2"
 )
 
-var RemovalFiles []string
-
 func RunCommand(app string, cmdLn string, stdin string) (bytes.Buffer, error) {
 	cmd := exec.Command(app)
 	if errors.Is(cmd.Err, exec.ErrDot) {
@@ -36,7 +34,7 @@ func RunCommand(app string, cmdLn string, stdin string) (bytes.Buffer, error) {
 	cmd.Stderr = &errb
 
 	err := cmd.Run()
-	// fmt.Println(err, "\n", outb.String(), "\n", errb.String())
+
 	if err != nil {
 		newErr := errors.New(errb.String() + "\n" + err.Error())
 		return bytes.Buffer{}, newErr
@@ -45,47 +43,65 @@ func RunCommand(app string, cmdLn string, stdin string) (bytes.Buffer, error) {
 	return outb, nil
 }
 
-func DownloadVideo(title, link string) error {
+func DownloadVideo(tmpPath, title, link string) error {
 	fmt.Printf("Downloading \"%s\"...", title)
 
-	cmdLn := fmt.Sprintf("/c -f \"ba/b\" -x --audio-format mp3 %s -o \"%s\"", link, title)
+	cmdLn := fmt.Sprintf("/c -f \"ba/b\" -x --audio-format mp3 %s -o \"%s\"", link, tmpPath)
 	_, err := RunCommand("yt-dlp", cmdLn, "")
 	if err != nil {
 		return err
 	}
-	RemovalFiles = append(RemovalFiles, title+".mp3")
+
 	fmt.Println("Video successfully downloaded...")
 	return nil
 }
 
-func sectionAudio(start, finish, trackName, filename, dir string) (string, error) {
-	trackName = filepath.Join(dir, trackName+".mp3")
-	cmdLn := fmt.Sprintf("/c -i \"%s.mp3\" -ss %s -to %s -c copy \"%s\"", filename, start, finish, trackName)
+func CheckExsists(dir, trackName string) (string, error) {
+	path := filepath.Join(dir, trackName+".mp3")
+	_, err := os.Stat(path)
+	if err == nil {
+		trackName = trackName + " copy"
+		path, err = CheckExsists(dir, trackName)
+		if err != nil {
+			return "", err
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		return path, nil
+	}
+	return path, nil
+}
 
-	_, err := RunCommand("ffmpeg", cmdLn, "")
+func sectionAudio(start, finish, trackName, tmpPath, dir string) (string, error) {
+	trackName, err := CheckExsists(dir, trackName)
+	if err != nil {
+		return "", err
+	}
+	cmdLn := fmt.Sprintf("/c -i \"%s.mp3\" -ss %s -to %s -c copy \"%s\"", tmpPath, start, finish, trackName)
+
+	_, err = RunCommand("ffmpeg", cmdLn, "")
 	if err != nil {
 		return "", err
 	}
 	return trackName, nil
 }
 
-func SplitVid(dir, title, link string) error {
-	timeStamps, err := GetTimeStamps(title)
+func SplitVid(dir, tmpPath, title, link string) error {
+	timeStamps, err := GetTimeStamps(tmpPath)
 	if err != nil {
 		return err
 	}
 
-	trackNames, err := GetTrackNames(title)
+	trackNames, err := GetTrackNames(tmpPath)
 	if err != nil {
 		return err
 	}
 
-	artistName, err := GetChannelName(title)
+	artistName, err := GetChannelName(tmpPath)
 	if err != nil {
 		return err
 	}
 
-	err = GetThumbNail(link, title)
+	err = GetThumbNail(link, tmpPath)
 	if err != nil {
 		return err
 	}
@@ -97,11 +113,11 @@ func SplitVid(dir, title, link string) error {
 		if err != nil {
 			return err
 		}
-		fileName, err := sectionAudio(timeStamps[i], timeStamps[i+1], trackName, title, dir)
+		fileName, err := sectionAudio(timeStamps[i], timeStamps[i+1], trackName, tmpPath, dir)
 		if err != nil {
 			return err
 		}
-		err = AddTags(trackName, title, artistName, fileName, dir)
+		err = AddTags(trackName, title, artistName, fileName, tmpPath)
 		if err != nil {
 			return err
 		}
@@ -113,27 +129,29 @@ func SplitVid(dir, title, link string) error {
 }
 
 func ValidateFileName(filename string) (string, error) {
-	pattern := `^[\w\-. ]+$`
+	pattern := `^[^#%&{}\\<>*?/$!'":@+\x60=]*$`
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		fmt.Println("f")
 		return "", err
 	}
 	if string(re.Find([]byte(filename))) == "" {
-		pattern = `^[\w\-. ]+`
+		pattern = `[#%&{}\\<>*?/$!'":@+\x60=]`
 		re, err = regexp.Compile(pattern)
 		if err != nil {
 			return "", err
 		}
-		vaildPart := string(re.Find([]byte(filename)))
-		nonValid, _ := strings.CutPrefix(filename, vaildPart)
-		filename = vaildPart + nonValid[1:]
+		index := re.FindIndex([]byte(filename))
+		filename = delChar(filename, index[0], index[1])
 		return ValidateFileName(filename)
 	}
 	return filename, nil
 }
 
-func AddTags(trackName, albumTitle, artistName, fileName, dir string) error {
+func delChar(s string, index1 int, index2 int) string {
+	return s[0:index1] + s[index2:]
+}
+
+func AddTags(trackName, albumTitle, artistName, fileName, tmpPath string) error {
 	tag, err := id3v2.Open(fileName, id3v2.Options{Parse: true})
 	if err != nil {
 		return err
@@ -144,7 +162,7 @@ func AddTags(trackName, albumTitle, artistName, fileName, dir string) error {
 	tag.SetTitle(trackName)
 	tag.SetAlbum(albumTitle)
 
-	artworkPath := albumTitle + ".jpg"
+	artworkPath := tmpPath + ".jpg"
 
 	artwork, err := os.ReadFile(artworkPath)
 	if err != nil {
@@ -186,7 +204,7 @@ func GetChannelName(title string) (string, error) {
 	return output, nil
 }
 
-func SaveDumpFile(title, link string) error {
+func SaveDumpFile(path, link string) error {
 	fmt.Println("Saving dump file...")
 	cmdLn := fmt.Sprintf("/c --dump-json %s", link)
 	dump, err := RunCommand("yt-dlp", cmdLn, "")
@@ -194,7 +212,8 @@ func SaveDumpFile(title, link string) error {
 		return err
 	}
 
-	f, err := os.Create(title + ".json")
+	path = path + ".json"
+	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
@@ -205,7 +224,6 @@ func SaveDumpFile(title, link string) error {
 		return err
 	}
 
-	RemovalFiles = append(RemovalFiles, title+".json")
 	fmt.Println("Dump file saved!")
 	return nil
 }
@@ -235,30 +253,29 @@ func GetTitle(link string) (string, error) {
 	return title, nil
 }
 
-func GetThumbNail(link, title string) error {
+func GetThumbNail(link, tmpPath string) error {
 	fmt.Println("Getting channel thumbnail...")
-	cmdLn := fmt.Sprintf("/c  --write-thumbnail --skip-download -o \"thumbnail:%s\" %s", title, link)
+
+	cmdLn := fmt.Sprintf("/c  --write-thumbnail --skip-download -o \"thumbnail:%s\" %s", tmpPath, link)
 	_, err := RunCommand("yt-dlp", cmdLn, "")
 	if err != nil {
 		return err
 	}
-	RemovalFiles = append(RemovalFiles, title+".webp")
 
-	cmdLn = fmt.Sprintf("/c -i \"%s.webp\" -filter:v \"crop=ih:ih\" \"%s.jpg\"", title, title)
+	cmdLn = fmt.Sprintf("/c -i \"%s.webp\" -filter:v \"crop=ih:ih\" \"%s.jpg\"", tmpPath, tmpPath)
 	_, err = RunCommand("ffmpeg", cmdLn, "")
 	if err != nil {
 		return err
 	}
-	RemovalFiles = append(RemovalFiles, title+".jpg")
 
 	fmt.Println("Got thumbnail!")
 	return nil
 }
 
-func GetDuration(title string) (string, error) {
+func GetDuration(tmpPath string) (string, error) {
 	cmdLn := "/c --raw-output \".duration\""
 
-	dump, err := os.ReadFile(title + ".json")
+	dump, err := os.ReadFile(tmpPath + ".json")
 	if err != nil {
 		return "", err
 	}
@@ -285,11 +302,11 @@ func GetDuration(title string) (string, error) {
 	return output, nil
 }
 
-func GetTimeStamps(title string) ([]string, error) {
+func GetTimeStamps(tmpPath string) ([]string, error) {
 	fmt.Println("Getting timestamps...")
 
 	cmdLn := "/c --raw-output \".chapters[].start_time\""
-	dump, err := os.ReadFile(title + ".json")
+	dump, err := os.ReadFile(tmpPath + ".json")
 	if err != nil {
 		return []string{}, err
 	}
@@ -309,7 +326,7 @@ func GetTimeStamps(title string) ([]string, error) {
 		output = append(output, stamp)
 	}
 
-	duration, err := GetDuration(title)
+	duration, err := GetDuration(tmpPath)
 	if err != nil {
 		return []string{}, err
 	}
@@ -319,11 +336,11 @@ func GetTimeStamps(title string) ([]string, error) {
 	return output, nil
 }
 
-func GetTrackNames(title string) ([]string, error) {
+func GetTrackNames(tmpPath string) ([]string, error) {
 	fmt.Println("Getting track names...")
 	cmdLn := "/c --raw-output \".chapters[].title\""
 
-	dump, err := os.ReadFile(title + ".json")
+	dump, err := os.ReadFile(tmpPath + ".json")
 	if err != nil {
 		return []string{}, err
 	}
@@ -361,21 +378,15 @@ func ConvertTimeStamps(timeStamp string) (string, error) {
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s), nil
 }
 
-func RemoveFile() {
-	for _, file := range RemovalFiles {
-		err := os.Remove(file)
-		if err != nil {
-			panic(err)
-		}
-	}
-}
-
-func Bub(keepTmpFiles bool, link, defaultFolder string) error {
+func Bub(link, defaultFolder string) error {
 	title, err := GetTitle(link)
 	if err != nil {
 		return err
 	}
-	err = SaveDumpFile(title, link)
+
+	tmpPath := filepath.Join("tmp", title)
+
+	err = SaveDumpFile(tmpPath, link)
 	if err != nil {
 		return err
 	}
@@ -393,17 +404,14 @@ func Bub(keepTmpFiles bool, link, defaultFolder string) error {
 		log.Println("Folder exists, skipping...")
 		return nil
 	} else {
-		if !keepTmpFiles {
-			defer RemoveFile()
-		}
 
-		err := DownloadVideo(title, link)
+		err := DownloadVideo(tmpPath, title, link)
 		if err != nil {
 			log.Fatal(err)
 			return err
 		}
 
-		err = SplitVid(dir, title, link)
+		err = SplitVid(dir, tmpPath, title, link)
 		if err != nil {
 			log.Fatal(err)
 			return err
@@ -419,9 +427,20 @@ func main() {
 	keepTmpFiles := flag.Bool("tmp", false, "keep downloaded files")
 	flag.Parse()
 
+	if !*keepTmpFiles {
+		defer os.RemoveAll("tmp")
+	}
+
 	if *playlistFilePath == "" && *link == "" {
 		log.Fatal("no link specified")
 		return
+	}
+	err := os.Mkdir("tmp", os.ModePerm)
+	if err != nil {
+		if !os.IsExist(err) {
+			log.Fatal(err)
+			return
+		}
 	}
 
 	switch {
@@ -445,7 +464,7 @@ func main() {
 
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			err := Bub(*keepTmpFiles, scanner.Text(), defaultFolder)
+			err := Bub(scanner.Text(), defaultFolder)
 			if err != nil {
 				log.Fatal(err)
 				return
@@ -462,7 +481,7 @@ func main() {
 			}
 		}
 
-		err = Bub(*keepTmpFiles, *link, defaultFolder)
+		err = Bub(*link, defaultFolder)
 		if err != nil {
 			log.Fatal(err)
 			return
